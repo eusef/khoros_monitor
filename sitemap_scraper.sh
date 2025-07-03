@@ -1,33 +1,51 @@
 #!/bin/bash
 
 # ==============================================================================
-# Sitemap Scraper with Date Filter (v4 - Universal Awk)
+# Sitemap Scraper with Date Filter (v6 - Help Section)
 #
 # Description:
 #   This script discovers and downloads URLs from a website's sitemap(s) that
-#   have been created or updated within a specific number of days. It uses
-#   a highly portable awk syntax to ensure compatibility across different
-#   systems, including Linux and macOS.
-#
-# Usage:
-#   ./sitemap_scraper.sh [OPTIONS] <WEBSITE_URL>
-#
-# Options:
-#   -d, --days N   (Optional) Scrape URLs modified in the last N days.
-#                  Defaults to 1 (the last 24 hours).
-#
-# Example (last 24 hours):
-#   ./sitemap_scraper.sh https://www.google.com
-#
-# Example (last 30 days):
-#   ./sitemap_scraper.sh -d 30 https://www.google.com
+#   have been created or updated within a specific number of days.
+#   It can take a base website URL to discover sitemaps via robots.txt, or a
+#   direct URL to a specific sitemap.xml or sitemap.xml.gz file.
 #
 # ==============================================================================
 
 # --- Configuration & Constants ---
-USER_AGENT="Mozilla/5.0 (compatible; SitemapScraper/4.0; +https://github.com/your-repo)"
+USER_AGENT="Mozilla/5.0 (compatible; SitemapScraper/6.0; +https://github.com/your-repo)"
 
 # --- Function Definitions ---
+
+show_help() {
+cat << EOF
+Sitemap Scraper with Date Filter (v6)
+
+Description:
+  This script discovers and downloads URLs from a website's sitemap(s) that
+  have been created or updated within a specific number of days.
+  It can take a base website URL to discover sitemaps via robots.txt, or a
+  direct URL to a specific sitemap.xml or sitemap.xml.gz file.
+
+Usage:
+  $0 [OPTIONS] <URL>
+
+Arguments:
+  URL          A base website URL (e.g., https://example.com) or a direct
+               URL to a sitemap (e.g., https://example.com/sitemap.xml).
+
+Options:
+  -d, --days N   (Optional) Scrape URLs modified in the last N days.
+                 Defaults to 1 (the last 24 hours).
+  -h, --help     Display this help message and exit.
+
+Examples:
+  # Scrape URLs from the last 24 hours by discovering sitemaps
+  $0 https://www.example.com
+
+  # Scrape URLs from the last 30 days from a specific sitemap file
+  $0 -d 30 https://www.example.com/sitemap.xml
+EOF
+}
 
 log() {
     echo "[INFO] $1"
@@ -44,6 +62,7 @@ process_sitemap() {
     log "Processing sitemap: $sitemap_url"
 
     local sitemap_content
+    # Use -L to follow redirects and handle gzipped sitemaps automatically
     sitemap_content=$(curl -s -A "$USER_AGENT" -L "$sitemap_url")
 
     if [ -z "$sitemap_content" ]; then
@@ -125,8 +144,14 @@ process_sitemap() {
 
 # 1. Initialize Default Values
 DAYS_AGO=1
+INPUT_URL=""
 
 # 2. Parse Command-Line Arguments
+if [ "$#" -eq 0 ]; then
+    show_help
+    exit 1
+fi
+
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -d|--days)
@@ -137,25 +162,27 @@ while [[ "$#" -gt 0 ]]; do
                 error "Argument for $1 is missing or not a number"
             fi
             ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
         -*)
             error "Unknown option: $1"
             ;;
         *)
-            WEBSITE_URL="$1"
+            INPUT_URL="$1"
             shift
             ;;
     esac
 done
 
 # 3. Validate Input
-if [ -z "$WEBSITE_URL" ]; then
-    echo "Usage: $0 [OPTIONS] <WEBSITE_URL>"
-    echo "Example: $0 -d 30 https://www.example.com"
-    exit 1
+if [ -z "$INPUT_URL" ]; then
+    show_help
+    error "No URL provided. Use -h for help."
 fi
 
 # 4. Calculate Cutoff Date (OS-aware)
-# This uses different flags for GNU date (Linux) and BSD date (macOS)
 if [[ "$(uname)" == "Darwin" ]]; then
     # macOS
     CUTOFF_DATE=$(date -v-${DAYS_AGO}d "+%Y-%m-%d")
@@ -167,43 +194,52 @@ fi
 log "Filtering for URLs modified on or after $CUTOFF_DATE ($DAYS_AGO days)."
 
 # 5. Initialize Variables
-DOMAIN_NAME=$(echo "$WEBSITE_URL" | sed -E 's/https?:\/\/([^/]+).*/\1/')
+DOMAIN_NAME=$(echo "$INPUT_URL" | sed -E 's/https?:\/\/([^/]+).*/\1/')
 if [ -z "$DOMAIN_NAME" ]; then
     error "Could not parse a valid domain name from the URL provided."
 fi
 
-ROBOTS_URL="${WEBSITE_URL%/}/robots.txt"
 OUTPUT_FILE="${DOMAIN_NAME}_urls.txt"
+> "$OUTPUT_FILE" # Create a fresh output file
 
-# Create a fresh output file
-> "$OUTPUT_FILE"
-
-log "Starting sitemap discovery for: $WEBSITE_URL"
+log "Starting sitemap processing for: $INPUT_URL"
 log "Output will be saved to: $OUTPUT_FILE"
 
-# 6. Find Initial Sitemap URLs from robots.txt
-log "Checking for sitemaps in $ROBOTS_URL..."
-SITEMAP_URLS=$(curl -s -A "$USER_AGENT" -L "$ROBOTS_URL" | grep -i "Sitemap:" | awk '{print $2}')
+# 6. Find Sitemap URLs (Discovery or Direct)
+SITEMAP_URLS=""
+# Check if the input is a direct link to a sitemap
+if [[ "$INPUT_URL" == *.xml || "$INPUT_URL" == *.xml.gz ]]; then
+    log "Direct sitemap URL provided. Skipping discovery."
+    SITEMAP_URLS="$INPUT_URL"
+else
+    # Otherwise, perform discovery using robots.txt
+    ROBOTS_URL="${INPUT_URL%/}/robots.txt"
+    log "Checking for sitemaps in $ROBOTS_URL..."
+    SITEMAP_URLS=$(curl -s -A "$USER_AGENT" -L "$ROBOTS_URL" | grep -i "Sitemap:" | awk '{print $2}')
 
-# 7. Fallback if no sitemaps found in robots.txt
-if [ -z "$SITEMAP_URLS" ]; then
-    log "No sitemaps found in robots.txt. Trying default /sitemap.xml..."
-    DEFAULT_SITEMAP_URL="${WEBSITE_URL%/}/sitemap.xml"
-    http_status=$(curl -o /dev/null -s -w "%{http_code}" -A "$USER_AGENT" -L "$DEFAULT_SITEMAP_URL")
-    if [ "$http_status" -eq 200 ]; then
-        log "Found default sitemap at $DEFAULT_SITEMAP_URL"
-        SITEMAP_URLS="$DEFAULT_SITEMAP_URL"
-    else
-        error "Could not find any sitemap references. Exiting."
+    # Fallback if no sitemaps found in robots.txt
+    if [ -z "$SITEMAP_URLS" ]; then
+        log "No sitemaps found in robots.txt. Trying default /sitemap.xml..."
+        DEFAULT_SITEMAP_URL="${INPUT_URL%/}/sitemap.xml"
+        http_status=$(curl -o /dev/null -s -w "%{http_code}" -A "$USER_AGENT" -L "$DEFAULT_SITEMAP_URL")
+        if [ "$http_status" -eq 200 ]; then
+            log "Found default sitemap at $DEFAULT_SITEMAP_URL"
+            SITEMAP_URLS="$DEFAULT_SITEMAP_URL"
+        fi
     fi
 fi
 
-# 8. Process all found sitemap URLs
+# Check if any sitemaps were found
+if [ -z "$SITEMAP_URLS" ]; then
+    error "Could not find any sitemaps to process. Exiting."
+fi
+
+# 7. Process all found sitemap URLs
 echo "$SITEMAP_URLS" | while read -r sitemap_url; do
     process_sitemap "$sitemap_url"
 done
 
-# 9. Finalize
+# 8. Finalize
 # Sort and remove duplicate URLs from the output file
 sort -u "$OUTPUT_FILE" -o "$OUTPUT_FILE"
 
